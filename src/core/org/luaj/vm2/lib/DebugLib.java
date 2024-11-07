@@ -21,6 +21,9 @@
 ******************************************************************************/
 package org.luaj.vm2.lib;
 
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
+
 import org.luaj.vm2.Globals;
 import org.luaj.vm2.Lua;
 import org.luaj.vm2.LuaBoolean;
@@ -507,43 +510,75 @@ public class DebugLib extends TwoArgFunction {
 		final static CallFrame[] EMPTY = {};
 		CallFrame[] frame = EMPTY;
 		int calls  = 0;
+		Lock lock = new ReentrantLock();
 
 		CallStack() {}
 		
-		synchronized int currentline() {
-			return calls > 0? frame[calls-1].currentline(): -1;
-		}
-
-		private synchronized CallFrame pushcall() {
-			if (calls >= frame.length) {
-				int n = Math.max(4, frame.length * 3 / 2);
-				CallFrame[] f = new CallFrame[n];
-				System.arraycopy(frame, 0, f, 0, frame.length);
-				for (int i = frame.length; i < n; ++i)
-					f[i] = new CallFrame();
-				frame = f;
-				for (int i = 1; i < n; ++i)
-					f[i].previous = f[i-1];
+		int currentline() {
+			lock.lock();
+			try {
+				return calls > 0? frame[calls-1].currentline(): -1;
+			} finally {
+				lock.unlock();
 			}
-			return frame[calls++];
-		}
-		
-		final synchronized void onCall(LuaFunction function) {
-			pushcall().set(function);
 		}
 
-		final synchronized void onCall(LuaClosure function, Varargs varargs, LuaValue[] stack) {
-			pushcall().set(function, varargs, stack);
+		private CallFrame pushcall() {
+			lock.lock();
+			try {
+				if (calls >= frame.length) {
+					int n = Math.max(4, frame.length * 3 / 2);
+					CallFrame[] f = new CallFrame[n];
+					System.arraycopy(frame, 0, f, 0, frame.length);
+					for (int i = frame.length; i < n; ++i)
+						f[i] = new CallFrame();
+					frame = f;
+					for (int i = 1; i < n; ++i)
+						f[i].previous = f[i-1];
+				}
+				return frame[calls++];
+			} finally {
+				lock.unlock();
+			}
 		}
 		
-		final synchronized void onReturn() {
-			if (calls > 0)
-				frame[--calls].reset();
+		final void onCall(LuaFunction function) {
+			lock.lock();
+			try {
+				pushcall().set(function);
+			} finally {
+				lock.unlock();
+			}
+		}
+
+		final void onCall(LuaClosure function, Varargs varargs, LuaValue[] stack) {
+			lock.lock();
+			try {
+				pushcall().set(function, varargs, stack);
+			} finally {
+				lock.unlock();
+			}
+			
 		}
 		
-		final synchronized void onInstruction(int pc, Varargs v, int top) {
-			if (calls > 0)
-				frame[calls-1].instr(pc, v, top);
+		final void onReturn() {
+			lock.lock();
+			try {
+				if (calls > 0)
+					frame[--calls].reset();
+			} finally {
+				lock.unlock();
+			}
+		}
+		
+		final void onInstruction(int pc, Varargs v, int top) {
+			lock.lock();
+			try {
+				if (calls > 0)
+					frame[calls-1].instr(pc, v, top);
+			} finally {
+				lock.unlock();
+			}
 		}
 
 		/**
@@ -551,102 +586,122 @@ public class DebugLib extends TwoArgFunction {
 		 * @param level
 		 * @return String containing the traceback.
 		 */
-		synchronized String traceback(int level) {
-			StringBuffer sb = new StringBuffer();
-			sb.append( "stack traceback:" );
-			for (DebugLib.CallFrame c; (c = getCallFrame(level++)) != null; ) {
-				sb.append("\n\t");
-				sb.append( c.shortsource() );
-				sb.append( ':' );
-				if (c.currentline() > 0)
-					sb.append( c.currentline()+":" );
-				sb.append( " in " );
-				DebugInfo ar = auxgetinfo("n", c.f, c);
-				if (c.linedefined() == 0)
-					sb.append("main chunk");
-				else if ( ar.name != null ) {
-					sb.append( "function '" );
-					sb.append( ar.name );
-					sb.append( '\'' );
-				} else {
-					sb.append( "function <" );
+		String traceback(int level) {
+			lock.lock();
+			try {
+				StringBuffer sb = new StringBuffer();
+				sb.append( "stack traceback:" );
+				for (DebugLib.CallFrame c; (c = getCallFrame(level++)) != null; ) {
+					sb.append("\n\t");
 					sb.append( c.shortsource() );
 					sb.append( ':' );
-					sb.append( c.linedefined() );
-					sb.append( '>' );
+					if (c.currentline() > 0)
+						sb.append( c.currentline()+":" );
+					sb.append( " in " );
+					DebugInfo ar = auxgetinfo("n", c.f, c);
+					if (c.linedefined() == 0)
+						sb.append("main chunk");
+					else if ( ar.name != null ) {
+						sb.append( "function '" );
+						sb.append( ar.name );
+						sb.append( '\'' );
+					} else {
+						sb.append( "function <" );
+						sb.append( c.shortsource() );
+						sb.append( ':' );
+						sb.append( c.linedefined() );
+						sb.append( '>' );
+					}
 				}
+				sb.append("\n\t[Java]: in ?");
+				return sb.toString();
+			} finally {
+				lock.unlock();
 			}
-			sb.append("\n\t[Java]: in ?");
-			return sb.toString();
+			
 		}
 
-		synchronized DebugLib.CallFrame getCallFrame(int level) {
-			if (level < 1 || level > calls)
+		DebugLib.CallFrame getCallFrame(int level) {
+			lock.lock();
+			try {
+				if (level < 1 || level > calls)
+					return null;
+				return frame[calls-level];
+			} finally {
+				lock.unlock();
+			}
+		}
+
+		DebugLib.CallFrame findCallFrame(LuaValue func) {
+			lock.lock();
+			try {
+				for (int i = 1; i <= calls; ++i)
+					if (frame[calls-i].f == func)
+						return frame[i];
 				return null;
-			return frame[calls-level];
-		}
-
-		synchronized DebugLib.CallFrame findCallFrame(LuaValue func) {
-			for (int i = 1; i <= calls; ++i)
-				if (frame[calls-i].f == func)
-					return frame[i];
-			return null;
-		}
-
-
-		synchronized DebugInfo auxgetinfo(String what, LuaFunction f, CallFrame ci) {
-			DebugInfo ar = new DebugInfo();
-			for (int i = 0, n = what.length(); i < n; ++i) {
-				switch (what.charAt(i)) {
-			      case 'S':
-			    	  ar.funcinfo(f);
-			    	  break;
-			      case 'l':
-			    	  ar.currentline = ci != null && ci.f.isclosure()? ci.currentline(): -1;
-			    	  break;
-			      case 'u':
-			    	  if (f != null && f.isclosure()) {
-			    		  Prototype p = f.checkclosure().p;
-			    		  ar.nups = (short) p.upvalues.length;
-			    		  ar.nparams = (short) p.numparams;
-			    		  ar.isvararg = p.is_vararg != 0;
-			    	  } else {
-				    	  ar.nups = 0;
-				    	  ar.isvararg = true;
-				    	  ar.nparams = 0;
-			    	  }
-			    	  break;
-			      case 't':
-			    	  ar.istailcall = false;
-			    	  break;
-			      case 'n': {
-			    	  /* calling function is a known Lua function? */
-			    	  if (ci != null && ci.previous != null) {
-			    		  if (ci.previous.f.isclosure()) {
-			    			  NameWhat nw = getfuncname(ci.previous);
-				    		  if (nw != null) {
-				    			  ar.name = nw.name;
-				    			  ar.namewhat = nw.namewhat;
-				    		  }
-			    		  }
-			    	  }
-			    	  if (ar.namewhat == null) {
-			    		  ar.namewhat = "";  /* not found */
-			    		  ar.name = null;
-			    	  }
-			    	  break;
-			      }
-			      case 'L':
-			      case 'f':
-			    	  break;
-			      default:
-			    	  // TODO: return bad status.
-			    	  break;
-				}
+			} finally {
+				lock.unlock();
 			}
-			return ar;
 		}
 
+
+		DebugInfo auxgetinfo(String what, LuaFunction f, CallFrame ci) {
+			lock.lock();
+			try {
+				DebugInfo ar = new DebugInfo();
+				for (int i = 0, n = what.length(); i < n; ++i) {
+					switch (what.charAt(i)) {
+				      case 'S':
+				    	  ar.funcinfo(f);
+				    	  break;
+				      case 'l':
+				    	  ar.currentline = ci != null && ci.f.isclosure()? ci.currentline(): -1;
+				    	  break;
+				      case 'u':
+				    	  if (f != null && f.isclosure()) {
+				    		  Prototype p = f.checkclosure().p;
+				    		  ar.nups = (short) p.upvalues.length;
+				    		  ar.nparams = (short) p.numparams;
+				    		  ar.isvararg = p.is_vararg != 0;
+				    	  } else {
+					    	  ar.nups = 0;
+					    	  ar.isvararg = true;
+					    	  ar.nparams = 0;
+				    	  }
+				    	  break;
+				      case 't':
+				    	  ar.istailcall = false;
+				    	  break;
+				      case 'n': {
+				    	  /* calling function is a known Lua function? */
+				    	  if (ci != null && ci.previous != null) {
+				    		  if (ci.previous.f.isclosure()) {
+				    			  NameWhat nw = getfuncname(ci.previous);
+					    		  if (nw != null) {
+					    			  ar.name = nw.name;
+					    			  ar.namewhat = nw.namewhat;
+					    		  }
+				    		  }
+				    	  }
+				    	  if (ar.namewhat == null) {
+				    		  ar.namewhat = "";  /* not found */
+				    		  ar.name = null;
+				    	  }
+				    	  break;
+				      }
+				      case 'L':
+				      case 'f':
+				    	  break;
+				      default:
+				    	  // TODO: return bad status.
+				    	  break;
+					}
+				}
+				return ar;
+			} finally {
+				lock.unlock();
+			}
+		}
 	}
 
 	public static class CallFrame {

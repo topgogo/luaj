@@ -14,7 +14,7 @@
 		<attribute name="jars" default="**/*.jar"/>
 		<sequential>
 			<mkdir dir="lib"/>
-			<get src="http://luaj.sourceforge.net/lib/@{zipname}.tar.gz" 
+			<get src="https://luaj.sourceforge.net/lib/@{zipname}.tar.gz" 
 				dest="lib/@{zipname}.tar.gz"/>
 			<gunzip src="lib/@{zipname}.tar.gz" dest="lib/@{zipname}.tar"/>
 			<untar src="lib/@{zipname}.tar" dest="lib" overwrite="true">

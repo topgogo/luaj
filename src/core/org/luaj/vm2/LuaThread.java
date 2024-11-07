@@ -23,6 +23,10 @@ package org.luaj.vm2;
 
 
 import java.lang.ref.WeakReference;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.Condition;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 
 /** 
  * Subclass of {@link LuaValue} that implements 
@@ -81,6 +85,19 @@ public class LuaThread extends LuaValue {
 	 * collection is run.  This can be changed by Java startup code if desired.
 	 */
 	public static long thread_orphan_check_interval = 5000;
+	
+	public static final String USE_PLATFORM_THREAD = "USE_PLATFORM_THREAD";
+	
+	private static boolean SUPPORT_VIRTUAL_THREAD = false;
+	
+	static {
+		try {
+			Thread.class.getMethod("ofVirtual");
+			SUPPORT_VIRTUAL_THREAD = true;
+		} catch (Exception e) {
+			//e.printStackTrace();
+		} 
+	}
 	
 	public static final int STATUS_INITIAL       = 0;
 	public static final int STATUS_SUSPENDED     = 1;
@@ -184,6 +201,8 @@ public class LuaThread extends LuaValue {
 		public int bytecodes;
 		
 		public int status = LuaThread.STATUS_INITIAL;
+		private Lock locker = new ReentrantLock();
+		private Condition cond = locker.newCondition();
 
 		State(Globals globals, LuaThread lua_thread, LuaValue function) {
 			this.globals = globals;
@@ -191,68 +210,98 @@ public class LuaThread extends LuaValue {
 			this.function = function;
 		}
 		
-		public synchronized void run() {
+		public void run() {
+			locker.lock();
 			try {
-				Varargs a = this.args;
-				this.args = LuaValue.NONE;
-				this.result = function.invoke(a);
-			} catch (Throwable t) {
-				this.error = t.getMessage();
-			} finally {
-				this.status = LuaThread.STATUS_DEAD;
-				this.notify();
-			}
-		}
-
-		public synchronized Varargs lua_resume(LuaThread new_thread, Varargs args) {
-			LuaThread previous_thread = globals.running;
-			try {
-				globals.running = new_thread;
-				this.args = args;
-				if (this.status == STATUS_INITIAL) {
-					this.status = STATUS_RUNNING; 
-					new Thread(this, "Coroutine-"+(++coroutine_count)).start();
-				} else {
-					this.notify();
+				try {
+					Varargs a = this.args;
+					this.args = LuaValue.NONE;
+					this.result = function.invoke(a);
+				} catch (Throwable t) {
+					this.error = t.getMessage();
+				} finally {
+					this.status = LuaThread.STATUS_DEAD;
+					cond.signal();
 				}
-				if (previous_thread != null)
-					previous_thread.state.status = STATUS_NORMAL;
-				this.status = STATUS_RUNNING;
-				this.wait();
-				return (this.error != null? 
-					LuaValue.varargsOf(LuaValue.FALSE, LuaValue.valueOf(this.error)):
-					LuaValue.varargsOf(LuaValue.TRUE, this.result));
-			} catch (InterruptedException ie) {
-				throw new OrphanedThread();
 			} finally {
-				this.args = LuaValue.NONE;
-				this.result = LuaValue.NONE;
-				this.error = null;
-				globals.running = previous_thread;
-				if (previous_thread != null)
-					globals.running.state.status =STATUS_RUNNING;
+				locker.unlock();
 			}
 		}
 
-		public synchronized Varargs lua_yield(Varargs args) {
+		public Varargs lua_resume(LuaThread new_thread, Varargs args) {
+			locker.lock();
 			try {
-				this.result = args;
-				this.status = STATUS_SUSPENDED;
-				this.notify();
-				do {
-					this.wait(thread_orphan_check_interval);
-					if (this.lua_thread.get() == null) {
-						this.status = STATUS_DEAD;
-						throw new OrphanedThread();
+				LuaThread previous_thread = globals.running;
+				try {
+					globals.running = new_thread;
+					this.args = args;
+					if (this.status == STATUS_INITIAL) {
+						this.status = STATUS_RUNNING;
+						Thread t = null;
+						if(SUPPORT_VIRTUAL_THREAD) {
+							LuaValue setting = globals.get(USE_PLATFORM_THREAD);
+							if(setting.isnil()) {//default
+								if(Thread.currentThread().isVirtual()) {
+									t = Thread.ofVirtual().name("Coroutine-"+(++coroutine_count)).start(this);
+								}
+							} else {
+								if(!setting.toboolean()) {
+									t = Thread.ofVirtual().name("Coroutine-"+(++coroutine_count)).start(this);
+								}
+							}
+						} 
+						if (t == null){
+							new Thread(this, "Coroutine-"+(++coroutine_count)).start();
+						}
+					} else {
+						cond.signal();
 					}
-				} while (this.status == STATUS_SUSPENDED);
-				return this.args;
-			} catch (InterruptedException ie) {
-				this.status = STATUS_DEAD;
-				throw new OrphanedThread();
+					if (previous_thread != null)
+						previous_thread.state.status = STATUS_NORMAL;
+					this.status = STATUS_RUNNING;
+					cond.await();
+					return (this.error != null? 
+						LuaValue.varargsOf(LuaValue.FALSE, LuaValue.valueOf(this.error)):
+						LuaValue.varargsOf(LuaValue.TRUE, this.result));
+				} catch (InterruptedException ie) {
+					throw new OrphanedThread();
+				} finally {
+					this.args = LuaValue.NONE;
+					this.result = LuaValue.NONE;
+					this.error = null;
+					globals.running = previous_thread;
+					if (previous_thread != null)
+						globals.running.state.status =STATUS_RUNNING;
+				}
 			} finally {
-				this.args = LuaValue.NONE;
-				this.result = LuaValue.NONE;
+				locker.unlock();
+			}
+		}
+
+		public Varargs lua_yield(Varargs args) {
+			locker.lock();
+			try {
+				try {
+					this.result = args;
+					this.status = STATUS_SUSPENDED;
+					cond.signal();
+					do {
+						cond.await(thread_orphan_check_interval,TimeUnit.MILLISECONDS);
+						if (this.lua_thread.get() == null) {
+							this.status = STATUS_DEAD;
+							throw new OrphanedThread();
+						}
+					} while (this.status == STATUS_SUSPENDED);
+					return this.args;
+				} catch (InterruptedException ie) {
+					this.status = STATUS_DEAD;
+					throw new OrphanedThread();
+				} finally {
+					this.args = LuaValue.NONE;
+					this.result = LuaValue.NONE;
+				}
+			} finally {
+				locker.unlock();
 			}
 		}
 	}

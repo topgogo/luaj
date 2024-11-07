@@ -119,11 +119,15 @@ public class IoLib extends TwoArgFunction {
 			return "file: " + Integer.toHexString(hashCode());
 		}
 		
-		public void finalize() {
-			if (!isclosed()) {
-				try {
-					close();
-				} catch (IOException ignore) {}
+		public void finalize() throws Throwable {
+			try {
+				if (!isclosed()) {
+					try {
+						close();
+					} catch (IOException ignore) {}
+				}
+			} finally {
+				super.finalize();
 			}
 		}
 	}

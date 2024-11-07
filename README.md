@@ -1020,6 +1020,11 @@ and at <a href="http://luaj.sourceforge.net/api/2.0/index.html">http://luaj.sour
 <li>Add synchronization to CoerceJavaToLua.COERCIONS map.</li>
 
 </ul></td></tr>
+<tr valign="top"><td>&nbsp;&nbsp;<b>3.1.0</b></td><td><ul>
+<li>Runtime upgrade to Java 8 or newer.</li>
+<li>Feature: Support Java 21 VirtualThread</li>
+
+</ul></td></tr>
 </table></td></tr></table>
 
 <h2>Known Issues</h2>
